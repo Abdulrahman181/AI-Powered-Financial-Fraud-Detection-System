@@ -8,7 +8,7 @@ An end-to-end machine learning system for detecting fraudulent financial transac
 
 Fraud detection is a critical problem in financial systems due to its **rare occurrence but high impact**.
 
-This project builds a **production-ready fraud detection system** that:
+This project builds an **end-to-end fraud-detection prototype** that:
 - Handles **extreme class imbalance (~0.13% fraud)**
 - Learns **user behavior patterns**
 - Uses **ensemble learning for robust predictions**
@@ -54,9 +54,10 @@ This project builds a **production-ready fraud detection system** that:
 - Removed unnecessary balance-related features
 - Log transformation applied to `amount`
 
-###  Train/Test Split
-- Time-based split (no random shuffling)
-- 80% training / 20% testing
+###  Train/Holdout Split
+- Chronological, step-ordered split with no random shuffling
+- 80% training / 20% chronological holdout
+- The holdout contains **1,272,524 transactions**
 
 ---
 
@@ -105,8 +106,7 @@ Engineered features focusing on **behavior + risk patterns**:
 - LightGBM
 - CatBoost
 
-All models achieved:
-- **ROC-AUC ≈ 0.95**
+The ensemble achieved **0.951918 ROC-AUC** on the chronological holdout. This is reported as a holdout result, not as an untouched external test benchmark.
 
 ---
 
@@ -128,9 +128,13 @@ A weighted ensemble combining all models:
 ##  Performance
 
 ###  ROC-AUC
-- Train: **0.967**
-- Test: **0.951**
-- Gap: **0.016 → Good generalization**
+- Training sample: **0.966423**
+- Chronological holdout: **0.951918**
+- Gap: **0.014505 AUC**, equivalent to **1.45 percentage points**
+
+### Threshold Analysis
+
+The notebook evaluates several operating points using precision-recall analysis. At the F1-selected threshold of **0.981419**, the holdout output reports **60.8% precision** and **36.4% recall**. Because that threshold was selected on the same holdout used for reporting, these precision/recall values are exploratory operating-point results—not an untouched final estimate. A production evaluation should select the threshold on a separate validation period and report once on a final chronological test period.
 
 ---
 
@@ -144,7 +148,7 @@ A weighted ensemble combining all models:
 
 ##  Risk Engine
 
-Transactions are classified into:
+The current prototype classifies transactions into:
 
 - 🔴 HIGH RISK (≥ 0.99)
 - 🟠 MEDIUM RISK (≥ 0.95)
