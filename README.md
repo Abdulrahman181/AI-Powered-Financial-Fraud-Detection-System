@@ -1,6 +1,6 @@
 #  AI-Powered Financial Fraud Detection System
 
-An end-to-end machine learning system for detecting fraudulent financial transactions using advanced feature engineering, ensemble learning, and risk-based decision strategies.
+An educational machine-learning prototype for exploring fraud detection on the synthetic PaySim dataset. It is not a production system or a tool for real financial decisions.
 
 ---
 
@@ -106,7 +106,7 @@ Engineered features focusing on **behavior + risk patterns**:
 - LightGBM
 - CatBoost
 
-The ensemble achieved **0.951918 ROC-AUC** on the chronological holdout. This is reported as a holdout result, not as an untouched external test benchmark.
+The notebook records an ensemble ROC-AUC of **0.951918** on its chronological holdout. This figure was not independently reproduced in this repository update, and it is not an untouched external benchmark or evidence of performance on real transactions.
 
 ---
 
@@ -142,14 +142,23 @@ The notebook evaluates several operating points using precision-recall analysis.
 
 - High Recall → Detect more fraud cases  
 - High Precision → Reduce false alarms  
-- System supports **business-driven decisions**
+- Outputs are for **educational review only**; they do not support or authorize real financial decisions
 
 ---
 
 ##  Risk Engine
 
-The current prototype classifies transactions into:
+The notebook uses the following exploratory score bands (the model scores are not calibrated probabilities):
 
 - 🔴 HIGH RISK (≥ 0.99)
 - 🟠 MEDIUM RISK (≥ 0.95)
 - 🟢 LOW RISK (< 0.95)
+
+
+## Safe setup, scope, and security
+
+- The notebook is designed for Google Colab and the synthetic PaySim dataset. Add `KAGGLE_USERNAME` and `KAGGLE_KEY` to Colab Secrets before running the data-download cells; do not paste credentials into a notebook cell, upload a credential file interactively, or commit credentials. The notebook writes a temporary `kaggle.json` in the runtime and does not display its contents.
+- Install the packages in `requirements.txt` in a compatible runtime. Dependency versions are not pinned, so this repository does not guarantee bit-for-bit reproducibility. The dataset itself is not included; obtain it from the [PaySim Kaggle dataset](https://www.kaggle.com/datasets/ealaxi/paysim1) and the original notebook output identified `CC-BY-SA-4.0`, but verify the current dataset license and attribution requirements directly on Kaggle before reuse or redistribution.
+- PaySim is synthetic data. The recorded holdout metrics have not been re-run as part of this update, and do not establish performance on real transactions. Model outputs are **uncalibrated ensemble scores**, not probabilities or confidence values; the displayed risk bands are illustrative.
+- **Credential incident:** a prior public notebook revision contained a Kaggle credential in saved output. This PR removes saved notebook outputs, but a normal PR cannot erase credentials from already-published Git history or other clones. Treat the credential as compromised: revoke it and create a replacement in Kaggle now. The repository owner should separately coordinate Git-history cleanup across affected refs and verify the public repository/cache state; do not add the replacement credential to Git.
+- The demo launches with `share=False`. Do not expose it publicly or use real transaction/customer information.
