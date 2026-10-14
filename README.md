@@ -1,155 +1,60 @@
-#  AI-Powered Financial Fraud Detection System
+# AI-Powered Financial Fraud Detection System
 
-An end-to-end machine learning system for detecting fraudulent financial transactions using advanced feature engineering, ensemble learning, and risk-based decision strategies.
+Leakage-aware PaySim fraud-detection reference pipeline. The repository contains a reproducible Python workflow and a cleaned notebook; it does **not** contain the PaySim data or trained model artifacts.
 
----
+## Data and responsible use
 
-##  Overview
+- **Dataset:** [PaySim1 on Kaggle](https://www.kaggle.com/datasets/ealaxi/paysim1) (the repository stores only the source URL in `Data.txt`).
+- Download the CSV under the dataset terms and place it at `data/PS_20174392719_1491204439457_log.csv`, or pass another path with `--data` / `PAYSIM_CSV`.
+- Do not commit `kaggle.json`, downloaded CSVs, model files, or real transaction data. The pipeline never downloads data and never creates a fallback dataset.
+- This is a research prototype, not a production authorization or customer-decisioning system. Thresholds, calibration, drift, privacy, access control, and human review require a separate risk/compliance process.
 
-Fraud detection is a critical problem in financial systems due to its **rare occurrence but high impact**.
+## Quick start
 
-This project builds an **end-to-end fraud-detection prototype** that:
-- Handles **extreme class imbalance (~0.13% fraud)**
-- Learns **user behavior patterns**
-- Uses **ensemble learning for robust predictions**
-- Provides **risk-based decision outputs**
+```bash
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m fraud_detection --data data/PS_20174392719_1491204439457_log.csv
+```
 
----
+The default command validates the file and prints its row count only. A missing file or invalid schema stops with an actionable error; no synthetic data is substituted.
 
-##  Dataset
+To train locally (this may require substantial memory/time for the full PaySim file):
 
-  - Source: PaySim dataset
-  - Size: 6.3 million transactions
-  - Features: 11 original features
-  - Data Quality:
-    - No missing values
-    - No duplicates
+```bash
+python -m fraud_detection --data data/PS_20174392719_1491204439457_log.csv \
+  --train --output-dir artifacts
+```
 
----
+Training writes `artifacts/*.joblib` and `artifacts/metadata.json`, which are ignored by Git. The final test metrics are printed only after threshold selection on a separate chronological validation period.
 
-##  Key Challenges
+## Methodology
 
-- Extreme class imbalance
-- Fraud is very rare (~0.13%)
-- Need to balance:
-  - High fraud detection (Recall)
-  - Low false alarms (Precision)
+1. Validate the required PaySim schema and non-empty, two-class labels.
+2. Sort by `step` and split into **60% chronological train / 20% validation / 20% final test**. No random split is used.
+3. Fit amount quantiles, user aggregates, and destination popularity on training data only. Training user history uses prior rows only; validation/test use frozen training-period aggregates.
+4. Downsample negatives only in the training period. Validation and final test retain their natural class distribution.
+5. Train seeded XGBoost, LightGBM, and CatBoost models with single-threaded inference settings for more stable reruns, then combine them with weights 0.3/0.3/0.4.
+6. Select the operating threshold on validation and report it once on the untouched final test. Report ROC-AUC, average precision, precision, and recall; accuracy is intentionally not used as the primary fraud metric.
 
----
+The notebook is an executable walkthrough of these functions. It contains no stored outputs, credentials, Colab upload calls, shell magics, or local absolute paths. It stops at data loading if the CSV is absent.
 
-##  Key Insights
+## Validation and development checks
 
-- Fraud occurs mainly in:
-  - `TRANSFER`
-  - `CASH_OUT`
-- High transaction amounts → higher fraud risk
-- Fraud activity increases during night hours
-- Each fraud transaction is typically unique per user
+```bash
+python -m pip install -r requirements-dev.txt
+ruff check .
+python -m compileall -q fraud_detection.py tests
+pytest -q
+```
 
----
+The tests cover missing-data/schema failures, chronological split boundaries, train-only feature state, fixed feature ordering, and validation-only threshold selection. They do not claim a full model run without the real dataset and model dependencies.
 
-##  Data Processing
+## Repository layout
 
-###  Cleaning
-- Removed unnecessary balance-related features
-- Log transformation applied to `amount`
-
-###  Train/Holdout Split
-- Chronological, step-ordered split with no random shuffling
-- 80% training / 20% chronological holdout
-- The holdout contains **1,272,524 transactions**
-
----
-
-##  Feature Engineering
-
-Engineered features focusing on **behavior + risk patterns**:
-
-###  Time Features
-- Hour of transaction
-- Night indicator
-
-###  Amount Features
-- Log-transformed amount
-- High / Very high transaction flags
-
-###  User Behavior
-- Transaction count
-- Average transaction amount
-- Last transaction amount
-
-###  Relative Features
-- Amount vs user average
-- Ratio vs last transaction
-
-###  Destination Features
-- Merchant detection
-- Destination popularity
-- New destination flag
-
-###  Risk Features
-- High-risk transfer indicator
-
----
-
-##  Handling Imbalance
-
-- Downsampling of non-fraud cases
-- `scale_pos_weight` for XGBoost / LightGBM
-- `auto_class_weights` for CatBoost
-
----
-
-##  Models Used
-
-- XGBoost
-- LightGBM
-- CatBoost
-
-The ensemble achieved **0.951918 ROC-AUC** on the chronological holdout. This is reported as a holdout result, not as an untouched external test benchmark.
-
----
-
-##  Ensemble System
-
-A weighted ensemble combining all models:
-
-- XGBoost → 30%
-- LightGBM → 30%
-- CatBoost → 40%
-
-###  Why Ensemble?
-- Improves stability
-- Reduces variance
-- Combines strengths of different models
-
----
-
-##  Performance
-
-###  ROC-AUC
-- Training sample: **0.966423**
-- Chronological holdout: **0.951918**
-- Gap: **0.014505 AUC**, equivalent to **1.45 percentage points**
-
-### Threshold Analysis
-
-The notebook evaluates several operating points using precision-recall analysis. At the F1-selected threshold of **0.981419**, the holdout output reports **60.8% precision** and **36.4% recall**. Because that threshold was selected on the same holdout used for reporting, these precision/recall values are exploratory operating-point results—not an untouched final estimate. A production evaluation should select the threshold on a separate validation period and report once on a final chronological test period.
-
----
-
-##  Interpretation
-
-- High Recall → Detect more fraud cases  
-- High Precision → Reduce false alarms  
-- System supports **business-driven decisions**
-
----
-
-##  Risk Engine
-
-The current prototype classifies transactions into:
-
-- 🔴 HIGH RISK (≥ 0.99)
-- 🟠 MEDIUM RISK (≥ 0.95)
-- 🟢 LOW RISK (< 0.95)
+- `fraud_detection.py` — validation, leakage-aware feature engineering, optional training/evaluation CLI.
+- `Financial_Fraud_Detection_System.ipynb` — cleaned, output-free walkthrough.
+- `tests/` — lightweight tests that do not download or invent a training dataset for results.
+- `Data.txt` — upstream dataset URL only.
+- `ENGINEERING_REVIEW.md` — audit findings, changes, validation evidence, and limitations.
