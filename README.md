@@ -29,10 +29,21 @@ python -m fraud_detection --data data/PS_20174392719_1491204439457_log.csv \
 
 Training writes `artifacts/*.joblib` and `artifacts/metadata.json`, which are ignored by Git. The final test metrics are printed only after threshold selection on a separate chronological validation period.
 
+To reload a complete bundle and score new, schema-valid rows without dropping the persisted feature state or threshold:
+
+```python
+from fraud_detection import predict_with_artifacts
+
+predictions = predict_with_artifacts(frame, "artifacts")
+# columns: probability, isFraud
+```
+
+`load_artifacts` checks the artifact version, exact feature order, persisted feature state, threshold, and all three model files before returning them. This is a local library contract, not an authenticated HTTP API.
+
 ## Methodology
 
 1. Validate the required PaySim schema and non-empty, two-class labels.
-2. Sort by `step` and split into **60% chronological train / 20% validation / 20% final test**. No random split is used.
+2. Sort by `step` and split into approximately **60% chronological train / 20% validation / 20% final test** using whole `step` groups. No random split is used, and rows from one time step cannot cross a boundary.
 3. Fit amount quantiles, user aggregates, and destination popularity on training data only. Training user history uses prior rows only; validation/test use frozen training-period aggregates.
 4. Downsample negatives only in the training period. Validation and final test retain their natural class distribution.
 5. Train seeded XGBoost, LightGBM, and CatBoost models with single-threaded inference settings for more stable reruns, then combine them with weights 0.3/0.3/0.4.
@@ -49,7 +60,7 @@ python -m compileall -q fraud_detection.py tests
 pytest -q
 ```
 
-The tests cover missing-data/schema failures, chronological split boundaries, train-only feature state, fixed feature ordering, and validation-only threshold selection. They do not claim a full model run without the real dataset and model dependencies.
+The tests cover missing-data/schema and numeric-domain failures, whole-step chronological boundaries, train-only feature state and label alignment, fixed feature ordering, metric and sampling contracts, artifact metadata compatibility, and validation-only threshold selection. They do not claim a full model run without the real dataset and model dependencies.
 
 ## Repository layout
 

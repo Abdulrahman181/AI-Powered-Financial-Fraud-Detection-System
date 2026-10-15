@@ -53,3 +53,34 @@ The implementation is now centered on `fraud_detection.py`. It validates real in
 - No claim is made that the historical README AUC/precision/recall values are reproducible by this revised pipeline. They were removed as current performance claims.
 - Dependency resolution was not performed for every heavy model package in this sandbox. The pinned ranges are declared, but a clean environment should install `requirements.txt` and run the full workflow with sufficient memory.
 - The repository does not yet provide a production HTTP API. Before deployment, add a small authenticated adapter around the shared feature/artifact contract, request limits, structured safe errors, drift monitoring, and an independently held-out temporal test policy.
+
+## Second Senior Review
+
+**Review date:** 2026-10-15
+**Scope:** all tracked files, Python implementation/tests, notebook JSON/code, README, dependency manifests, Git history/diff, and local validation.
+**Commit:** local review commit; no push performed.
+
+### Findings and fixes
+
+1. **Temporal boundary leakage remained possible at duplicate `step` values.** The first revision split by row count, which could place rows from one PaySim time step in different periods. `chronological_split` now allocates whole sorted step groups; the documented 60/20/20 proportions are therefore approximate by row count.
+2. **Training feature/label row order could diverge.** `_previous_user_features` sorted by originator to calculate prior-only history and returned that order, while labels retained chronological order. The function now restores the input index order, and a regression test asserts alignment.
+3. **Schema validation was too permissive.** Inputs could contain non-finite, negative, non-integral, missing, unsupported-type, or non-binary values and fail later or silently create unusable features. A shared normalization/validation contract now checks these domains and canonicalizes the numeric and identifier columns.
+4. **Period-level class and metric contracts were implicit.** Validation/test periods may be single-class even when the complete CSV has two classes. Threshold selection and evaluation now reject single-class, length-mismatched, out-of-range, or non-finite inputs with actionable errors; feature transformation still permits a single-class prediction period.
+5. **Sampling alignment was unchecked.** Negative sampling now requires equal lengths and the same unique index for features/labels, preventing accidental positional/label misalignment.
+6. **Artifact reload was incomplete.** Added versioned metadata, exact model-name metadata, `load_artifacts`, and `predict_with_artifacts`; they validate feature order, persisted feature state, threshold, model presence, and `predict_proba` support before scoring. Training now accepts a path-like output directory and an explicit seed; the CLI avoids loading the dataset twice.
+7. **Regression coverage was insufficient.** Added tests for numeric-domain failures, duplicate-step boundaries, training row alignment, metric validation, sampling alignment, and incompatible artifact metadata. No synthetic dataset or performance metric was added.
+
+### Second-review validation
+
+- `ruff check .` — passed.
+- `python3 -m compileall -q fraud_detection.py tests` — passed.
+- `pytest -q` — **10 passed**.
+- Notebook JSON/AST hygiene — passed: all code cells parse, zero outputs, and no execution counts.
+- Missing-data CLI check — exited non-zero with the documented actionable PaySim path/download message.
+- No full end-to-end training claim: the repository still has no PaySim CSV, and this sandbox lacks the declared XGBoost, LightGBM, CatBoost, and nbformat packages needed for a clean full workflow.
+
+### Remaining risks
+
+- The full six-million-row training, real artifact reload, memory/latency behavior, and final test metrics remain unverified until the user supplies PaySim data and installs the core dependencies.
+- The prior exposed Kaggle credential remains in Git history and must be revoked/rotated; history rewriting was intentionally not performed.
+- `predict_with_artifacts` is a local library helper, not an authenticated/rate-limited production API. Production use still needs access control, safe transport, monitoring/drift policy, calibration review, and operational rollback/versioning.

@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 RANDOM_SEED = 42
+ARTIFACT_VERSION = 1
 DEFAULT_DATA_PATH = Path("data/PS_20174392719_1491204439457_log.csv")
 REQUIRED_COLUMNS = {
     "step",
@@ -54,6 +55,8 @@ FEATURE_COLUMNS = [
     "type_CASH_OUT",
     "high_transfer_risk",
 ]
+ALLOWED_TYPES = {"CASH_IN", "CASH_OUT", "DEBIT", "PAYMENT", "TRANSFER"}
+NUMERIC_COLUMNS = ("step", "amount", "isFraud")
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,52 @@ def _normalise_path(path: str | os.PathLike[str] | None) -> Path:
     return Path(path or os.environ.get("PAYSIM_CSV", DEFAULT_DATA_PATH)).expanduser()
 
 
+def _validated_frame(
+    frame: pd.DataFrame,
+    *,
+    context: str,
+    require_both_classes: bool = True,
+) -> pd.DataFrame:
+    """Return a normalized copy after enforcing the PaySim data contract."""
+
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError(f"{context} must be a pandas DataFrame")
+    missing = sorted(REQUIRED_COLUMNS.difference(frame.columns))
+    if missing:
+        raise ValueError(f"{context} is missing columns: {', '.join(missing)}")
+    if frame.empty:
+        raise ValueError(f"{context} is empty")
+
+    normalized = frame.copy()
+    for column in NUMERIC_COLUMNS:
+        values = pd.to_numeric(normalized[column], errors="coerce")
+        if values.isna().any() or not np.isfinite(values.to_numpy(dtype=float)).all():
+            raise ValueError(f"{context}.{column} must contain finite numeric values")
+        normalized[column] = values
+    if (normalized["step"] < 0).any() or (normalized["step"] % 1 != 0).any():
+        raise ValueError(f"{context}.step must contain non-negative integers")
+    if (normalized["amount"] < 0).any():
+        raise ValueError(f"{context}.amount must contain non-negative values")
+    labels = set(normalized["isFraud"].tolist())
+    if not labels.issubset({0, 1}):
+        raise ValueError(f"{context}.isFraud must contain only 0/1 labels")
+    if require_both_classes and normalized["isFraud"].nunique() < 2:
+        raise ValueError(f"{context} must contain both fraud and non-fraud labels")
+
+    for column in ("type", "nameOrig", "nameDest"):
+        if normalized[column].isna().any():
+            raise ValueError(f"{context}.{column} must not contain missing values")
+        normalized[column] = normalized[column].astype(str).str.strip()
+        if (normalized[column] == "").any():
+            raise ValueError(f"{context}.{column} must not contain empty values")
+    invalid_types = sorted(set(normalized["type"]) - ALLOWED_TYPES)
+    if invalid_types:
+        raise ValueError(f"{context}.type contains unsupported values: {invalid_types}")
+    normalized["step"] = normalized["step"].astype(np.int64)
+    normalized["isFraud"] = normalized["isFraud"].astype(np.int8)
+    return normalized
+
+
 def load_paysim(path: str | os.PathLike[str] | None = None) -> pd.DataFrame:
     """Load and validate a PaySim CSV, failing clearly when it is unavailable."""
 
@@ -84,16 +133,7 @@ def load_paysim(path: str | os.PathLike[str] | None = None) -> pd.DataFrame:
         )
 
     frame = pd.read_csv(csv_path)
-    missing = sorted(REQUIRED_COLUMNS.difference(frame.columns))
-    if missing:
-        raise ValueError(
-            f"Invalid PaySim schema in {csv_path}; missing columns: {', '.join(missing)}"
-        )
-    if frame.empty:
-        raise ValueError(f"PaySim CSV is empty: {csv_path}")
-    if frame["isFraud"].nunique(dropna=True) < 2:
-        raise ValueError("PaySim CSV must contain both fraud and non-fraud labels")
-    return frame
+    return _validated_frame(frame, context=f"Invalid PaySim data in {csv_path}")
 
 
 def chronological_split(
@@ -107,24 +147,27 @@ def chronological_split(
         raise ValueError("train_fraction and validation_fraction must be between 0 and 1")
     if train_fraction + validation_fraction >= 1:
         raise ValueError("train_fraction + validation_fraction must be less than 1")
-    ordered = frame.sort_values("step", kind="mergesort").reset_index(drop=True)
-    train_end = int(len(ordered) * train_fraction)
-    validation_end = train_end + int(len(ordered) * validation_fraction)
-    if min(train_end, validation_end - train_end, len(ordered) - validation_end) < 1:
-        raise ValueError("Dataset is too small for non-empty train/validation/test periods")
+    ordered = _validated_frame(frame, context="Frame")
+    ordered = ordered.sort_values("step", kind="mergesort").reset_index(drop=True)
+    steps = ordered["step"].drop_duplicates().to_numpy()
+    train_end = int(len(steps) * train_fraction)
+    validation_end = train_end + int(len(steps) * validation_fraction)
+    if min(train_end, validation_end - train_end, len(steps) - validation_end) < 1:
+        raise ValueError("Dataset is too small for three non-empty step periods")
+    train_steps = set(steps[:train_end])
+    validation_steps = set(steps[train_end:validation_end])
+    test_steps = set(steps[validation_end:])
     return (
-        ordered.iloc[:train_end].copy(),
-        ordered.iloc[train_end:validation_end].copy(),
-        ordered.iloc[validation_end:].copy(),
+        ordered[ordered["step"].isin(train_steps)].copy(),
+        ordered[ordered["step"].isin(validation_steps)].copy(),
+        ordered[ordered["step"].isin(test_steps)].copy(),
     )
 
 
 def fit_feature_state(train_frame: pd.DataFrame) -> FeatureState:
     """Fit all target-independent feature statistics on training data only."""
 
-    required = REQUIRED_COLUMNS.difference(train_frame.columns)
-    if required:
-        raise ValueError(f"Training frame is missing columns: {sorted(required)}")
+    train_frame = _validated_frame(train_frame, context="Training frame")
     ordered = train_frame.sort_values(["nameOrig", "step"], kind="mergesort")
     user_groups = ordered.groupby("nameOrig", sort=False)
     return FeatureState(
@@ -153,7 +196,7 @@ def _previous_user_features(frame: pd.DataFrame) -> pd.DataFrame:
         groups["amount"].transform(lambda values: values.shift().expanding().mean())
     )
     ordered["last_amount"] = groups["amount"].shift()
-    return ordered
+    return ordered.sort_index()
 
 
 def transform_features(
@@ -169,10 +212,7 @@ def transform_features(
     rows from influencing an earlier prediction.
     """
 
-    missing = REQUIRED_COLUMNS.difference(frame.columns)
-    if missing:
-        raise ValueError(f"Frame is missing columns: {sorted(missing)}")
-    source = frame.copy()
+    source = _validated_frame(frame, context="Frame", require_both_classes=False)
     if training_period:
         source = _previous_user_features(source)
     else:
@@ -209,7 +249,14 @@ def sample_training_data(
 
     if not 0 < non_fraud_fraction <= 1:
         raise ValueError("non_fraud_fraction must be in (0, 1]")
-    labels = labels.astype(int)
+    if len(features) != len(labels) or not features.index.equals(labels.index):
+        raise ValueError("features and labels must have the same unique index and length")
+    if not features.index.is_unique:
+        raise ValueError("features and labels must have a unique index")
+    labels = pd.to_numeric(labels, errors="coerce")
+    if labels.isna().any() or not set(labels.tolist()).issubset({0, 1}):
+        raise ValueError("Training labels must contain only finite 0/1 values")
+    labels = labels.astype(np.int8)
     positives = labels == 1
     if positives.sum() == 0 or (~positives).sum() == 0:
         raise ValueError("Training data must contain both fraud and non-fraud labels")
@@ -227,6 +274,16 @@ def select_threshold(y_validation: pd.Series, probabilities: np.ndarray) -> floa
 
     from sklearn.metrics import precision_recall_curve
 
+    y_validation = pd.to_numeric(y_validation, errors="coerce")
+    probabilities = np.asarray(probabilities, dtype=float)
+    if len(y_validation) != len(probabilities) or len(y_validation) == 0:
+        raise ValueError("Validation labels and probabilities must have the same non-zero length")
+    if y_validation.isna().any() or not set(y_validation.tolist()).issubset({0, 1}):
+        raise ValueError("Validation labels must contain only 0/1 values")
+    if y_validation.nunique() < 2:
+        raise ValueError("Validation labels must contain both fraud and non-fraud classes")
+    if not np.isfinite(probabilities).all() or ((probabilities < 0) | (probabilities > 1)).any():
+        raise ValueError("Validation probabilities must be finite values in [0, 1]")
     precision, recall, thresholds = precision_recall_curve(y_validation, probabilities)
     if len(thresholds) == 0:
         return 0.5
@@ -248,6 +305,18 @@ def evaluate_probabilities(
         roc_auc_score,
     )
 
+    probabilities = np.asarray(probabilities, dtype=float)
+    y_true = pd.to_numeric(y_true, errors="coerce")
+    if len(y_true) != len(probabilities) or len(y_true) == 0:
+        raise ValueError("Labels and probabilities must have the same non-zero length")
+    if y_true.isna().any() or not set(y_true.tolist()).issubset({0, 1}):
+        raise ValueError("Evaluation labels must contain only 0/1 values")
+    if y_true.nunique() < 2:
+        raise ValueError("Evaluation labels must contain both fraud and non-fraud classes")
+    if not np.isfinite(probabilities).all() or ((probabilities < 0) | (probabilities > 1)).any():
+        raise ValueError("Evaluation probabilities must be finite values in [0, 1]")
+    if not np.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ValueError("threshold must be a finite value in [0, 1]")
     predictions = (probabilities >= threshold).astype(int)
     return {
         "roc_auc": float(roc_auc_score(y_true, probabilities)),
@@ -318,14 +387,122 @@ def train_ensemble(
 def ensemble_probability(models: dict[str, Any], features: pd.DataFrame) -> np.ndarray:
     """Predict a weighted ensemble probability in the same order as training."""
 
-    return (
-        0.3 * models["xgb"].predict_proba(features)[:, 1]
-        + 0.3 * models["lgb"].predict_proba(features)[:, 1]
-        + 0.4 * models["cat"].predict_proba(features)[:, 1]
+    if list(features.columns) != FEATURE_COLUMNS:
+        raise ValueError("Feature columns do not match the trained FEATURE_COLUMNS contract")
+    required_models = ("xgb", "lgb", "cat")
+    missing = [name for name in required_models if name not in models]
+    if missing:
+        raise ValueError(f"Missing ensemble models: {missing}")
+    model_probabilities = []
+    for name in required_models:
+        output = np.asarray(models[name].predict_proba(features), dtype=float)
+        if output.shape != (len(features), 2):
+            raise ValueError(f"Model {name} returned invalid predict_proba shape: {output.shape}")
+        model_probabilities.append(output[:, 1])
+    probabilities = (
+        0.3 * model_probabilities[0]
+        + 0.3 * model_probabilities[1]
+        + 0.4 * model_probabilities[2]
+    )
+    if not np.isfinite(probabilities).all():
+        raise ValueError("Ensemble returned non-finite probabilities")
+    return np.clip(probabilities, 0, 1)
+
+
+def _feature_state_from_metadata(metadata: dict[str, Any]) -> FeatureState:
+    """Validate and reconstruct feature state stored beside model artifacts."""
+
+    raw = metadata.get("feature_state")
+    if not isinstance(raw, dict):
+        raise TypeError("Artifact metadata has no valid feature_state")
+    try:
+        state = FeatureState(
+            amount_95=float(raw["amount_95"]),
+            amount_99=float(raw["amount_99"]),
+            user_avg_amount={str(k): float(v) for k, v in raw["user_avg_amount"].items()},
+            last_amount={str(k): float(v) for k, v in raw["last_amount"].items()},
+            user_tx_count={str(k): int(v) for k, v in raw["user_tx_count"].items()},
+            dest_popularity={str(k): int(v) for k, v in raw["dest_popularity"].items()},
+        )
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("Artifact metadata has an invalid feature_state") from exc
+    scalar_values = (state.amount_95, state.amount_99)
+    if not np.isfinite(scalar_values).all() or any(v < 0 for v in scalar_values):
+        raise ValueError("Artifact metadata has invalid amount quantiles")
+    return state
+
+
+def load_artifacts(output_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load and validate the complete model bundle written by :func:`run_training`."""
+
+    import joblib
+
+    directory = Path(output_dir).expanduser()
+    metadata_path = directory / "metadata.json"
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"Artifact metadata not found: {metadata_path}")
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read artifact metadata: {metadata_path}") from exc
+    if not isinstance(metadata, dict):
+        raise TypeError("Artifact metadata must contain a JSON object")
+    if metadata.get("artifact_version") != ARTIFACT_VERSION:
+        raise ValueError("Unsupported or missing artifact_version")
+    if metadata.get("feature_columns") != FEATURE_COLUMNS:
+        raise ValueError("Artifact feature_columns do not match this pipeline")
+    _feature_state_from_metadata(metadata)
+    try:
+        threshold = metadata["test_metrics"]["threshold"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("Artifact metadata has no selected threshold") from exc
+    try:
+        threshold = float(threshold)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Artifact threshold must be a finite value in [0, 1]") from exc
+    if not np.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ValueError("Artifact threshold must be a finite value in [0, 1]")
+    models = {}
+    for name in ("xgb", "lgb", "cat"):
+        model_path = directory / f"{name}.joblib"
+        if not model_path.is_file():
+            raise FileNotFoundError(f"Artifact model not found: {model_path}")
+        try:
+            model = joblib.load(model_path)
+        except (EOFError, ImportError, OSError, ValueError) as exc:
+            raise ValueError(f"Could not load artifact model {name}: {model_path}") from exc
+        if not hasattr(model, "predict_proba"):
+            raise ValueError(f"Artifact model {name} does not implement predict_proba")
+        models[name] = model
+    return models, metadata
+
+
+def predict_with_artifacts(
+    frame: pd.DataFrame,
+    output_dir: str | os.PathLike[str],
+) -> pd.DataFrame:
+    """Score new rows with a complete, metadata-validated artifact bundle."""
+
+    models, metadata = load_artifacts(output_dir)
+    state = _feature_state_from_metadata(metadata)
+    features = transform_features(frame, state)
+    probabilities = ensemble_probability(models, features)
+    threshold = float(metadata["test_metrics"]["threshold"])
+    return pd.DataFrame(
+        {
+            "probability": probabilities,
+            "isFraud": (probabilities >= threshold).astype(np.int8),
+        },
+        index=frame.index,
     )
 
 
-def run_training(data_path: str | os.PathLike[str], output_dir: Path) -> dict[str, Any]:
+def run_training(
+    data_path: str | os.PathLike[str],
+    output_dir: str | os.PathLike[str],
+    *,
+    random_seed: int = RANDOM_SEED,
+) -> dict[str, Any]:
     """Run the complete leakage-aware workflow and save models/metadata locally."""
 
     import joblib
@@ -339,24 +516,29 @@ def run_training(data_path: str | os.PathLike[str], output_dir: Path) -> dict[st
     y_train = train["isFraud"].astype(int)
     y_validation = validation["isFraud"].astype(int)
     y_test = test["isFraud"].astype(int)
-    x_train, y_train_sampled = sample_training_data(x_train_full, y_train)
-    models = train_ensemble(x_train, y_train_sampled)
+    x_train, y_train_sampled = sample_training_data(
+        x_train_full, y_train, random_seed=random_seed
+    )
+    models = train_ensemble(x_train, y_train_sampled, random_seed=random_seed)
     validation_probability = ensemble_probability(models, x_validation)
     threshold = select_threshold(y_validation, validation_probability)
     test_probability = ensemble_probability(models, x_test)
     metrics = evaluate_probabilities(y_test, test_probability, threshold)
 
+    output_dir = Path(output_dir).expanduser()
     output_dir.mkdir(parents=True, exist_ok=True)
     for name, model in models.items():
         joblib.dump(model, output_dir / f"{name}.joblib")
     (output_dir / "metadata.json").write_text(
         json.dumps(
             {
+                "artifact_version": ARTIFACT_VERSION,
+                "model_names": ["xgb", "lgb", "cat"],
                 "feature_columns": FEATURE_COLUMNS,
                 "feature_state": asdict(state),
                 "threshold_selected_on": "validation",
                 "test_metrics": metrics,
-                "random_seed": RANDOM_SEED,
+                "random_seed": random_seed,
             },
             indent=2,
         )
@@ -371,8 +553,8 @@ def main() -> None:
     parser.add_argument("--train", action="store_true", help="Train models; otherwise validate only")
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts"))
     args = parser.parse_args()
-    frame = load_paysim(args.data)
     if not args.train:
+        frame = load_paysim(args.data)
         print(f"Validated {len(frame):,} rows; no model training was requested.")
         return
     metrics = run_training(args.data, args.output_dir)
